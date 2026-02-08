@@ -95,6 +95,28 @@
     const formatDateShort = (d, lang) => new Date(d).toLocaleDateString(lang === 'ko' ? 'ko-KR' : 'en-US', { month: 'short', day: 'numeric' });
     const generateId = () => 'p_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 
+    // 결제 정보 추출 (새/구 구조 호환) - 전역 헬퍼
+    const getPayment = (sale) => ({
+      method: sale.payment?.method || sale.paymentMethod,
+      type: sale.payment?.type || sale.cardType
+    });
+
+    // Summary 계산 헬퍼 - 중복 제거
+    const calculateSummary = (salesList) => {
+      const activeSales = salesList.filter(s => s.status !== 'cancelled');
+      return {
+        totalRevenue: activeSales.reduce((s, x) => s + (x.price || 0), 0),
+        totalTax: activeSales.reduce((s, x) => s + (x.tax || 0), 0),
+        cashRevenue: activeSales.filter(x => getPayment(x).method === 'cash').reduce((s, x) => s + (x.price || 0), 0),
+        cardRevenue: activeSales.filter(x => getPayment(x).method === 'card').reduce((s, x) => s + (x.price || 0), 0),
+        venmoRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'venmo').reduce((s, x) => s + (x.price || 0), 0),
+        zelleRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'zelle').reduce((s, x) => s + (x.price || 0), 0),
+        squareRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'square').reduce((s, x) => s + (x.price || 0), 0),
+        totalItems: activeSales.reduce((s, x) => s + (x.totalQty || x.totalQuantity || 0), 0),
+        transactionCount: activeSales.length
+      };
+    };
+
     // ============ 번역 ============
     const TRANSLATIONS = {
       ko: {
@@ -346,8 +368,14 @@
       const [taxRate, saveTaxRate, taxLoading] = useFirebaseData('taxRate', 9.5);
       const [logs, saveLogs, logsLoading] = useFirebaseData('logs', []);
       const [categories, saveCategories, categoriesLoading] = useFirebaseData('categories', DEFAULT_CATEGORIES);
+      const [currentLocation, saveCurrentLocation, locationLoading] = useFirebaseData('currentLocation', '');
 
-      const loading = productsLoading || salesLoading || recordsLoading || taxLoading || logsLoading || categoriesLoading;
+      // 장소 입력 로컬 상태 (blur 시에만 Firebase 저장)
+      const [localLocation, setLocalLocation] = useState('');
+
+      useEffect(() => { setLocalLocation(currentLocation); }, [currentLocation]);
+
+      const loading = productsLoading || salesLoading || recordsLoading || taxLoading || logsLoading || categoriesLoading || locationLoading;
 
       // ============ 메모이제이션 (성능 최적화) ============
       
@@ -564,29 +592,34 @@
 
       // ============ 판매 취소 ============
       const handleCancelSale = async (sale) => {
-        const stockChanges = {};
-        
-        // 새 구조 (itemDetails 배열) 또는 기존 구조 (items 객체) 호환
-        if (sale.itemDetails) {
-          sale.itemDetails.forEach(item => {
-            stockChanges[item.id] = item.qty;
+        try {
+          const stockChanges = {};
+
+          // 새 구조 (itemDetails 배열) 또는 기존 구조 (items 객체) 호환
+          if (sale.itemDetails) {
+            sale.itemDetails.forEach(item => {
+              stockChanges[item.id] = item.qty;
+            });
+          } else if (sale.items) {
+            Object.entries(sale.items).forEach(([id, q]) => {
+              stockChanges[id] = q;
+            });
+          }
+
+          await updateMultipleStock(stockChanges);
+          await saveSales(sales.map(s =>
+            s.id === sale.id ? { ...sale, status: 'cancelled', cancelledAt: new Date().toISOString() } : s
+          ));
+          await addLog('sale_cancelled', {
+            saleId: sale.id,
+            itemDetails: sale.itemDetails?.map(i => ({ name: i.name, qty: i.qty })) || Object.entries(sale.items || {}).map(([id, qty]) => ({ name: getProductName(id), qty })),
+            price: sale.price,
+            originalTimestamp: sale.timestamp
           });
-        } else if (sale.items) {
-          Object.entries(sale.items).forEach(([id, q]) => {
-            stockChanges[id] = q;
-          });
+        } catch (error) {
+          console.error('Cancel sale error:', error);
+          alert(lang === 'ko' ? '판매 취소 중 오류가 발생했습니다.' : 'Error cancelling sale.');
         }
-        
-        await updateMultipleStock(stockChanges);
-        await saveSales(sales.map(s => 
-          s.id === sale.id ? { ...sale, status: 'cancelled', cancelledAt: new Date().toISOString() } : s
-        ));
-        await addLog('sale_cancelled', {
-          saleId: sale.id,
-          itemDetails: sale.itemDetails?.map(i => ({ name: i.name, qty: i.qty })) || Object.entries(sale.items || {}).map(([id, qty]) => ({ name: getProductName(id), qty })),
-          price: sale.price,
-          originalTimestamp: sale.timestamp
-        });
       };
 
       // ============ 판매 수정 ============
@@ -621,6 +654,7 @@
       const handleSaveEdit = async () => {
         const totalQty = Object.values(editItems).reduce((s, q) => s + q, 0);
         if (totalQty === 0) return;
+        try {
 
         const oldSale = editingSale;
         const oldItems = getSaleItems(oldSale);
@@ -675,9 +709,9 @@
         });
 
         // 카테고리 정보
-        const categories = [...new Set(newItemDetails.map(i => i.category))];
-        const isMixed = categories.length > 1;
-        const categoryNames = categories.map(c => categories.find(cat => cat.id === c)?.name).join(' + ');
+        const editCategoryIds = [...new Set(newItemDetails.map(i => i.category))];
+        const isMixed = editCategoryIds.length > 1;
+        const categoryNames = editCategoryIds.map(cId => categories.find(cat => cat.id === cId)?.name).join(' + ');
 
         // 🆕 개선된 구조로 저장
         const updatedSale = {
@@ -686,8 +720,8 @@
           status: oldSale.status,
           
           category: {
-            id: isMixed ? 'mixed' : categories[0],
-            name: isMixed ? categoryNames : categories.find(c => c.id === categories[0])?.name,
+            id: isMixed ? 'mixed' : editCategoryIds[0],
+            name: isMixed ? categoryNames : categories.find(c => c.id === editCategoryIds[0])?.name,
             isMixed
           },
           
@@ -722,6 +756,10 @@
         });
 
         editDispatch({ type: 'CLOSE_EDIT' });
+        } catch (error) {
+          console.error('Edit sale error:', error);
+          alert(lang === 'ko' ? '판매 수정 중 오류가 발생했습니다.' : 'Error editing sale.');
+        }
       };
 
       // ============ 카테고리 관리 ============
@@ -812,18 +850,21 @@
 
       const handleEditProduct = async (product, newName, newPrice) => {
         if (!newName.trim()) return;
-        
+
+        const productCat = categories.find(c => c.id === product.category);
+        const isFixed = productCat?.priceType === 'fixed';
+
         const updated = products.map(p => {
           if (p.id === product.id) {
             const result = { ...p, name: newName.trim() };
-            if (newPrice !== undefined && p.price !== undefined) {
+            if (newPrice !== undefined && (p.price !== undefined || isFixed)) {
               result.price = newPrice;
             }
             return result;
           }
           return p;
         });
-        
+
         await saveProducts(updated);
         setEditingProduct(null);
       };
@@ -842,61 +883,36 @@
       // ============ 마감 처리 ============
       const handleDayClose = async () => {
         if (sales.length === 0) { setShowCloseModal(false); return; }
-        
-        const activeSales = sales.filter(s => s.status !== 'cancelled');
-        const getPayment = (x) => ({
-          method: x.payment?.method || x.paymentMethod,
-          type: x.payment?.type || x.cardType
-        });
-        const summary = {
-          totalRevenue: activeSales.reduce((s, x) => s + x.price, 0),
-          totalTax: activeSales.reduce((s, x) => s + (x.tax || 0), 0),
-          cashRevenue: activeSales.filter(x => getPayment(x).method === 'cash').reduce((s, x) => s + x.price, 0),
-          cardRevenue: activeSales.filter(x => getPayment(x).method === 'card').reduce((s, x) => s + x.price, 0),
-          venmoRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'venmo').reduce((s, x) => s + x.price, 0),
-          zelleRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'zelle').reduce((s, x) => s + x.price, 0),
-          squareRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'square').reduce((s, x) => s + x.price, 0),
-          totalItems: activeSales.reduce((s, x) => s + (x.totalQty || x.totalQuantity || 0), 0),
-          transactionCount: activeSales.length
-        };
+        try {
+          const newRecord = {
+            id: Date.now(),
+            date: new Date().toISOString(),
+            dateString: new Date(sales[0].timestamp).toDateString(),
+            location: localLocation || '',
+            sales: [...sales],
+            summary: calculateSummary(sales),
+            productsSnapshot: products.map(p => ({ id: p.id, name: p.name, stock: p.stock }))
+          };
 
-        const newRecord = {
-          id: Date.now(),
-          date: new Date().toISOString(),
-          dateString: new Date(sales[0].timestamp).toDateString(),
-          sales: [...sales],
-          summary,
-          productsSnapshot: products.map(p => ({ id: p.id, name: p.name, stock: p.stock }))
-        };
-
-        await saveDailyRecords([newRecord, ...dailyRecords]);
-        await saveSales([]);
-        setShowCloseModal(false);
+          await saveDailyRecords([newRecord, ...dailyRecords]);
+          await saveSales([]);
+          setShowCloseModal(false);
+        } catch (error) {
+          console.error('Day close error:', error);
+          alert(lang === 'ko' ? '마감 처리 중 오류가 발생했습니다.' : 'Error closing day.');
+        }
       };
 
       const handleRestoreSales = async (record) => {
+        try {
         if (sales.length > 0) {
-          const activeSales = sales.filter(s => s.status !== 'cancelled');
-          const getPayment = (x) => ({
-            method: x.payment?.method || x.paymentMethod,
-            type: x.payment?.type || x.cardType
-          });
           const cr = {
             id: Date.now(),
             date: new Date(sales[0].timestamp).toISOString(),
             dateString: new Date(sales[0].timestamp).toDateString(),
+            location: localLocation || '',
             sales: [...sales],
-            summary: {
-              totalRevenue: activeSales.reduce((s, x) => s + x.price, 0),
-              totalTax: activeSales.reduce((s, x) => s + (x.tax || 0), 0),
-              cashRevenue: activeSales.filter(x => getPayment(x).method === 'cash').reduce((s, x) => s + x.price, 0),
-              cardRevenue: activeSales.filter(x => getPayment(x).method === 'card').reduce((s, x) => s + x.price, 0),
-              venmoRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'venmo').reduce((s, x) => s + x.price, 0),
-              zelleRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'zelle').reduce((s, x) => s + x.price, 0),
-              squareRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'square').reduce((s, x) => s + x.price, 0),
-              totalItems: activeSales.reduce((s, x) => s + (x.totalQty || x.totalQuantity || 0), 0),
-              transactionCount: activeSales.length
-            }
+            summary: calculateSummary(sales)
           };
           let ur = [...dailyRecords];
           const idx = ur.findIndex(r => r.dateString === cr.dateString);
@@ -907,43 +923,26 @@
         } else {
           await saveDailyRecords(dailyRecords.filter(r => r.id !== record.id));
         }
-        
+
         await saveSales([...record.sales]);
         setViewingRecord(null);
         setActiveTab('sales');
         setShowSalesHistory(true);
+        } catch (error) {
+          console.error('Restore sales error:', error);
+          alert(lang === 'ko' ? '복구 중 오류가 발생했습니다.' : 'Error restoring sales.');
+        }
       };
 
       // ============ 기록 재계산 ============
       const recalculateAllRecords = async () => {
         if (dailyRecords.length === 0) return;
-        
-        const updatedRecords = dailyRecords.map(record => {
-          const salesList = record.sales || [];
-          const activeSales = salesList.filter(s => s.status !== 'cancelled');
-          
-          // 결제 방법 가져오기 (새/구 구조 호환)
-          const getPayment = (x) => ({
-            method: x.payment?.method || x.paymentMethod,
-            type: x.payment?.type || x.cardType
-          });
-          
-          // 다시 계산
-          const newSummary = {
-            totalRevenue: activeSales.reduce((s, x) => s + (x.price || 0), 0),
-            totalTax: activeSales.reduce((s, x) => s + (x.tax || 0), 0),
-            cashRevenue: activeSales.filter(x => getPayment(x).method === 'cash').reduce((s, x) => s + (x.price || 0), 0),
-            cardRevenue: activeSales.filter(x => getPayment(x).method === 'card').reduce((s, x) => s + (x.price || 0), 0),
-            venmoRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'venmo').reduce((s, x) => s + (x.price || 0), 0),
-            zelleRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'zelle').reduce((s, x) => s + (x.price || 0), 0),
-            squareRevenue: activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'square').reduce((s, x) => s + (x.price || 0), 0),
-            totalItems: activeSales.reduce((s, x) => s + (x.totalQty || x.totalQuantity || 0), 0),
-            transactionCount: activeSales.length
-          };
-          
-          return { ...record, summary: newSummary };
-        });
-        
+
+        const updatedRecords = dailyRecords.map(record => ({
+          ...record,
+          summary: calculateSummary(record.sales || [])
+        }));
+
         await saveDailyRecords(updatedRecords);
         alert(lang === 'ko' ? '기록이 재계산되었습니다!' : 'Records recalculated!');
       };
@@ -974,26 +973,9 @@
 
       // ============ 통계 ============
       const getCurrentStats = () => {
+        const summary = calculateSummary(sales);
         const activeSales = sales.filter(s => s.status !== 'cancelled');
-        const totalRevenue = activeSales.reduce((s, x) => s + x.price, 0);
-        const totalTax = activeSales.reduce((s, x) => s + (x.tax || 0), 0);
-        
-        // 새/구 구조 호환
-        const getPayment = (x) => ({
-          method: x.payment?.method || x.paymentMethod,
-          type: x.payment?.type || x.cardType
-        });
-        
-        const cashRevenue = activeSales.filter(x => getPayment(x).method === 'cash').reduce((s, x) => s + x.price, 0);
-        const cardRevenue = activeSales.filter(x => getPayment(x).method === 'card').reduce((s, x) => s + x.price, 0);
-        
-        // 카드 상세 (Venmo, Zelle, Square)
-        const venmoRevenue = activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'venmo').reduce((s, x) => s + x.price, 0);
-        const zelleRevenue = activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'zelle').reduce((s, x) => s + x.price, 0);
-        const squareRevenue = activeSales.filter(x => getPayment(x).method === 'card' && getPayment(x).type === 'square').reduce((s, x) => s + x.price, 0);
-        
-        const totalItems = activeSales.reduce((s, x) => s + (x.totalQty || x.totalQuantity || 0), 0);
-        
+
         let dateLabel = lang === 'ko' ? '오늘' : 'Today';
         if (activeSales.length > 0) {
           const dates = [...new Set(activeSales.map(s => new Date(s.timestamp).toDateString()))];
@@ -1002,8 +984,8 @@
           else if (dates.length === 1) dateLabel = new Date(activeSales[0].timestamp).toLocaleDateString(lang === 'ko' ? 'ko-KR' : 'en-US', { month: 'short', day: 'numeric' });
           else dateLabel = t.currentList;
         }
-        
-        return { totalRevenue, totalTax, cashRevenue, cardRevenue, venmoRevenue, zelleRevenue, squareRevenue, totalItems, count: activeSales.length, dateLabel };
+
+        return { ...summary, count: summary.transactionCount, dateLabel };
       };
 
       const getStatsData = () => {
@@ -1200,6 +1182,19 @@
               <div className="bg-gradient-to-r from-blue-600 to-purple-600 rounded-2xl p-6 text-white mb-4 shadow-lg">
                 <h1 className="text-2xl font-bold mb-1">🎯 {t.title}</h1>
                 <p className="text-blue-100 text-sm">{t.subtitle}</p>
+              </div>
+
+              {/* 장소 입력 */}
+              <div className="bg-white rounded-xl p-3 mb-4 shadow-sm flex items-center gap-2">
+                <span className="text-lg">📍</span>
+                <input
+                  type="text"
+                  value={localLocation}
+                  onChange={e => setLocalLocation(e.target.value)}
+                  onBlur={e => saveCurrentLocation(e.target.value)}
+                  placeholder={lang === 'ko' ? '장소 (예: Rose Bowl)' : 'Location (e.g. Rose Bowl)'}
+                  className="flex-1 p-2 border rounded-lg text-sm"
+                />
               </div>
 
               {/* 오늘 통계 */}
@@ -1504,6 +1499,7 @@
                       <div className="flex justify-between mb-3">
                         <div>
                           <div className="font-bold text-lg">{formatDate(record.date, lang)}</div>
+                          {record.location && <div className="text-xs text-gray-500">📍 {record.location}</div>}
                           <div className="text-sm text-gray-500">{record.summary.transactionCount}{t.transactions} / {record.summary.totalItems || 0}{t.items}</div>
                         </div>
                         <div className="text-right">
@@ -1732,21 +1728,25 @@
                 <div className="space-y-2">
                   {currentProducts.map(product => (
                     <div key={product.id} className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
-                      {editingProduct?.id === product.id ? (
+                      {(() => {
+                        const productCat = categories.find(c => c.id === product.category);
+                        const isFixed = productCat?.priceType === 'fixed';
+                        const showPrice = product.price !== undefined || isFixed;
+                        return editingProduct?.id === product.id ? (
                         <>
                           <input type="text" defaultValue={product.name} autoFocus id={`edit-name-${product.id}`} className="flex-1 p-1 border rounded text-sm"/>
-                          {product.price !== undefined && (
-                            <input type="number" defaultValue={product.price} id={`edit-price-${product.id}`} className="w-16 p-1 border rounded text-sm text-center"/>
+                          {showPrice && (
+                            <input type="number" defaultValue={product.price || 0} id={`edit-price-${product.id}`} className="w-16 p-1 border rounded text-sm text-center" placeholder="$"/>
                           )}
                           <input type="number" defaultValue={product.stock} id={`edit-stock-${product.id}`} className="w-16 p-1 border rounded text-sm text-center"/>
                           <button onClick={() => {
                             const name = document.getElementById(`edit-name-${product.id}`).value;
-                            const price = document.getElementById(`edit-price-${product.id}`)?.value;
+                            const priceEl = document.getElementById(`edit-price-${product.id}`);
                             const stock = document.getElementById(`edit-stock-${product.id}`).value;
                             const updated = products.map(p => {
                               if (p.id === product.id) {
                                 const result = { ...p, name, stock: parseInt(stock) || 0 };
-                                if (price !== undefined) result.price = parseFloat(price) || 0;
+                                if (priceEl) result.price = parseFloat(priceEl.value) || 0;
                                 return result;
                               }
                               return p;
@@ -1759,12 +1759,13 @@
                       ) : (
                         <>
                           <span className="flex-1 text-sm font-medium">{product.name}</span>
-                          {product.price !== undefined && <span className="text-sm text-green-600 font-medium">${product.price}</span>}
+                          {showPrice && <span className="text-sm text-green-600 font-medium">${product.price || 0}</span>}
                           <span className="text-sm text-blue-600">{product.stock}</span>
                           <button onClick={() => setEditingProduct(product)} className="p-1 text-blue-500">✏️</button>
                           <button onClick={() => handleDeleteProduct(product)} className="p-1 text-red-500">🗑️</button>
                         </>
-                      )}
+                      );
+                      })()}
                     </div>
                   ))}
                 </div>
@@ -1868,6 +1869,24 @@
                   </div>
                   <button onClick={() => setViewingRecord(null)} className="text-gray-400 text-xl">×</button>
                 </div>
+                {/* 장소 수정 */}
+                <div className="flex items-center gap-2 mb-4 p-2 bg-gray-50 rounded-lg">
+                  <span className="text-sm">📍</span>
+                  <input
+                    type="text"
+                    defaultValue={viewingRecord.location || ''}
+                    id={`edit-location-${viewingRecord.id}`}
+                    placeholder={lang === 'ko' ? '장소 입력' : 'Enter location'}
+                    className="flex-1 p-1 border rounded text-sm"
+                  />
+                  <button onClick={() => {
+                    const newLoc = document.getElementById(`edit-location-${viewingRecord.id}`).value;
+                    const updated = dailyRecords.map(r => r.id === viewingRecord.id ? { ...r, location: newLoc } : r);
+                    saveDailyRecords(updated);
+                    setViewingRecord({ ...viewingRecord, location: newLoc });
+                  }} className="px-2 py-1 bg-blue-500 text-white rounded text-xs">{t.save}</button>
+                </div>
+
                 <div className="bg-green-50 rounded-lg p-3 mb-4 text-center">
                   <div className="text-2xl font-bold text-green-600">{formatCurrency(viewingRecord.summary.totalRevenue)}</div>
                   {viewingRecord.summary.totalTax > 0 && <div className="text-xs text-orange-500">{t.tax} {formatCurrency(viewingRecord.summary.totalTax)}</div>}
