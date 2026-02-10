@@ -2,6 +2,10 @@
 .firebase/
 *.log
 
+# Backup files (contain API keys)
+clicker-deploy/public/Backup/
+clicker-deploy/public/migrate.html
+
 # Node
 node_modules/
 package-lock.json
