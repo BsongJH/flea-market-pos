@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="ko">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
@@ -14,10 +15,16 @@
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-    * { -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+
+    * {
+      -webkit-tap-highlight-color: transparent;
+    }
   </style>
 </head>
+
 <body>
   <div id="root"></div>
   <script type="text/babel">
@@ -34,6 +41,16 @@
     };
     firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore();
+
+    // 🔥 오프라인 persistence 활성화 (IndexedDB 자동 캐시)
+    db.enablePersistence({ synchronizeTabs: true })
+      .catch((err) => {
+        if (err.code === 'failed-precondition') {
+          console.warn('Persistence failed: multiple tabs open');
+        } else if (err.code === 'unimplemented') {
+          console.warn('Persistence not supported in this browser');
+        }
+      });
 
     // ============ 카테고리 설정 ============
     const DEFAULT_CATEGORIES = [
@@ -141,9 +158,14 @@
         resetWarning3: '상품 목록 초기화', resetWarning4: '재고 기본값으로 복구', reset: '초기화', loading: '로딩 중...',
         firebaseMode: '🔥 Firebase 연동', algorithmApplied: '2개=20불 할인 적용', stickerDeal: '2개=$5 할인 적용', cancelled: '취소됨',
         logs: '변경 로그', noLogs: '로그가 없습니다',
+        offline: '📴 오프라인 - 로컬에 저장됨', syncing: '🔄 동기화 중...', online: '🔥 Firebase 연동',
         saleCreated: '판매 등록', saleCancelled: '판매 취소', saleEdited: '판매 수정', inventoryChanged: '재고 수정',
         clicker: '클리커', keyring: '키링', sticker: '스티커', blindbag: 'Blind Bag', mixed: '복합',
-        stock: '재고', addProduct: '상품 추가', editProduct: '상품 수정'
+        stock: '재고', addProduct: '상품 추가', editProduct: '상품 수정',
+        archive: '보관', archived: '보관된 기록', archiveConfirm: '이 기록을 보관함으로 이동하시겠습니까?',
+        unarchive: '복원', permanentDelete: '완전 삭제', permanentDeleteConfirm: '이 기록을 완전히 삭제하시겠습니까? 복구할 수 없습니다.',
+        mergeRecords: '중복 병합', mergeConfirm: '같은 날짜의 기록을 하나로 합치시겠습니까?',
+        closing: '마감 중...', showArchived: '보관된 기록 보기', hideArchived: '보관된 기록 숨기기'
       },
       en: {
         sales: 'Sales', history: 'History', title: 'Flea Market POS', subtitle: 'Inventory & Sales Tracker',
@@ -167,14 +189,19 @@
         resetWarning3: 'Reset product list', resetWarning4: 'Reset inventory to default', reset: 'Reset', loading: 'Loading...',
         firebaseMode: '🔥 Firebase Connected', algorithmApplied: '2 for $20 deal applied', stickerDeal: '2 for $5 deal applied', cancelled: 'Cancelled',
         logs: 'Change Log', noLogs: 'No logs yet',
+        offline: '📴 Offline - Saved locally', syncing: '🔄 Syncing...', online: '🔥 Firebase Connected',
         saleCreated: 'Sale Created', saleCancelled: 'Sale Cancelled', saleEdited: 'Sale Edited', inventoryChanged: 'Inventory Changed',
         clicker: 'Clicker', keyring: 'Keyring', sticker: 'Sticker', blindbag: 'Blind Bag', mixed: 'Mixed',
-        stock: 'Stock', addProduct: 'Add Product', editProduct: 'Edit Product'
+        stock: 'Stock', addProduct: 'Add Product', editProduct: 'Edit Product',
+        archive: 'Archive', archived: 'Archived Records', archiveConfirm: 'Move this record to archive?',
+        unarchive: 'Restore', permanentDelete: 'Delete Permanently', permanentDeleteConfirm: 'Permanently delete this record? This cannot be undone.',
+        mergeRecords: 'Merge Duplicates', mergeConfirm: 'Merge same-date records into one?',
+        closing: 'Closing...', showArchived: 'Show Archived', hideArchived: 'Hide Archived'
       }
     };
 
     // ============ Reducers (상태 그룹화) ============
-    
+
     // 판매 수정 모달 상태
     const editInitialState = {
       sale: null,
@@ -291,13 +318,30 @@
       }
     }
 
+    // ============ 네트워크 상태 훅 ============
+    function useNetworkStatus() {
+      const [isOnline, setIsOnline] = useState(navigator.onLine);
+      const [isSyncing, setIsSyncing] = useState(false);
+
+      useEffect(() => {
+        const handleOnline = () => { setIsOnline(true); setIsSyncing(true); setTimeout(() => setIsSyncing(false), 2000); };
+        const handleOffline = () => setIsOnline(false);
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+        return () => { window.removeEventListener('online', handleOnline); window.removeEventListener('offline', handleOffline); };
+      }, []);
+
+      return { isOnline, isSyncing };
+    }
+
     // ============ Firebase 훅 ============
     function useFirebaseData(collectionName, defaultValue) {
       const [data, setData] = useState(defaultValue);
       const [loading, setLoading] = useState(true);
-      
+      const docRef = db.collection('store').doc(collectionName);
+
       useEffect(() => {
-        const unsubscribe = db.collection('store').doc(collectionName).onSnapshot((doc) => {
+        const unsubscribe = docRef.onSnapshot((doc) => {
           if (doc.exists) setData(doc.data().value);
           else setData(defaultValue);
           setLoading(false);
@@ -305,18 +349,31 @@
         return () => unsubscribe();
       }, [collectionName]);
 
+      // 기존 방식: 전체 덮어쓰기 (단순 설정값용 - taxRate, currentLocation 등)
       const saveData = async (newData) => {
-        try { 
-          await db.collection('store').doc(collectionName).set({ 
-            value: newData, 
-            updatedAt: new Date().toISOString() 
-          }); 
-          setData(newData); 
+        try {
+          await docRef.set({
+            value: newData,
+            updatedAt: new Date().toISOString()
+          });
         }
         catch (error) { console.error('Save error:', error); }
       };
 
-      return [data, saveData, loading];
+      // 🆕 트랜잭션 방식: mutation 함수로 현재 서버 값을 읽고 변환 (배열 데이터용)
+      const saveWithMutation = async (mutationFn) => {
+        try {
+          await db.runTransaction(async (transaction) => {
+            const doc = await transaction.get(docRef);
+            const currentValue = doc.exists ? doc.data().value : defaultValue;
+            const newValue = mutationFn(currentValue);
+            transaction.set(docRef, { value: newValue, updatedAt: new Date().toISOString() });
+          });
+        }
+        catch (error) { console.error('Transaction error:', error); throw error; }
+      };
+
+      return [data, saveData, loading, saveWithMutation];
     }
 
     // ============ 메인 앱 ============
@@ -326,11 +383,11 @@
       const [activeTab, setActiveTab] = useState('sales');
       const [selectedCategory, setSelectedCategory] = useState('clicker');
       const [isSaleProcessing, setIsSaleProcessing] = useState(false);
-      
+
       // 판매 입력 상태 (그룹화)
       const [saleInput, saleDispatch] = useReducer(saleInputReducer, saleInputInitialState);
       const { selectedItems, paymentMethod, cardType, memo: saleMemo, useCustomPrice: useCustomSalePrice, customPrice: customSalePrice, addTaxToCustom } = saleInput;
-      
+
       // 모달 상태들
       const [showTaxModal, setShowTaxModal] = useState(false);
       const [tempTaxRate, setTempTaxRate] = useState(9.5);
@@ -339,12 +396,13 @@
       const [newProductName, setNewProductName] = useState('');
       const [newProductPrice, setNewProductPrice] = useState(10);
       const [showSalesHistory, setShowSalesHistory] = useState(false);
-      
+
       // 판매 수정 상태 (그룹화)
       const [editState, editDispatch] = useReducer(editReducer, editInitialState);
       const { sale: editingSale, items: editItems, paymentMethod: editPaymentMethod, cardType: editCardType, price: editPrice, memo: editMemo, useCustomPrice } = editState;
-      
+
       const [showCloseModal, setShowCloseModal] = useState(false);
+      const [isClosing, setIsClosing] = useState(false);
       const [viewingRecord, setViewingRecord] = useState(null);
       const [showResetModal, setShowResetModal] = useState(false);
       const [showStatsModal, setShowStatsModal] = useState(false);
@@ -354,21 +412,25 @@
       const [showLogsModal, setShowLogsModal] = useState(false);
       const [showCardDetailModal, setShowCardDetailModal] = useState(false);
       const [selectedRecordForCard, setSelectedRecordForCard] = useState(null);
-      
+      const [showArchivedRecords, setShowArchivedRecords] = useState(false);
+
       // 카테고리 모달 상태
       const [showCategoryModal, setShowCategoryModal] = useState(false);
       const [editingCategory, setEditingCategory] = useState(null);
       const [newCategoryName, setNewCategoryName] = useState('');
       const [newCategoryEmoji, setNewCategoryEmoji] = useState('📦');
 
-      // Firebase 데이터 - 새 통합 구조
-      const [products, saveProducts, productsLoading] = useFirebaseData('products', DEFAULT_PRODUCTS);
-      const [sales, saveSales, salesLoading] = useFirebaseData('sales', []);
-      const [dailyRecords, saveDailyRecords, recordsLoading] = useFirebaseData('dailyRecords', []);
+      // Firebase 데이터 - 새 통합 구조 (saveWithMutation 추가)
+      const [products, saveProducts, productsLoading, mutateProducts] = useFirebaseData('products', DEFAULT_PRODUCTS);
+      const [sales, saveSales, salesLoading, mutateSales] = useFirebaseData('sales', []);
+      const [dailyRecords, saveDailyRecords, recordsLoading, mutateDailyRecords] = useFirebaseData('dailyRecords', []);
       const [taxRate, saveTaxRate, taxLoading] = useFirebaseData('taxRate', 9.5);
-      const [logs, saveLogs, logsLoading] = useFirebaseData('logs', []);
-      const [categories, saveCategories, categoriesLoading] = useFirebaseData('categories', DEFAULT_CATEGORIES);
+      const [logs, saveLogs, logsLoading, mutateLogs] = useFirebaseData('logs', []);
+      const [categories, saveCategories, categoriesLoading, mutateCategories] = useFirebaseData('categories', DEFAULT_CATEGORIES);
       const [currentLocation, saveCurrentLocation, locationLoading] = useFirebaseData('currentLocation', '');
+
+      // 네트워크 상태
+      const networkStatus = useNetworkStatus();
 
       // 장소 입력 로컬 상태 (blur 시에만 Firebase 저장)
       const [localLocation, setLocalLocation] = useState('');
@@ -378,7 +440,7 @@
       const loading = productsLoading || salesLoading || recordsLoading || taxLoading || logsLoading || categoriesLoading || locationLoading;
 
       // ============ 메모이제이션 (성능 최적화) ============
-      
+
       // 카테고리 Map - O(1) 조회
       const categoriesMap = useMemo(() => {
         const map = new Map();
@@ -405,10 +467,10 @@
       // 현재 카테고리 상품
       const currentProducts = productsByCategory[selectedCategory] || [];
 
-      // 로그 추가
+      // 로그 추가 (트랜잭션)
       const addLog = async (action, details) => {
         const newLog = { id: Date.now(), timestamp: new Date().toISOString(), action, ...details };
-        await saveLogs([newLog, ...logs]);
+        await mutateLogs(currentLogs => [newLog, ...currentLogs]);
       };
 
       // 상품 찾기 헬퍼 (Map 사용으로 즉시 조회)
@@ -417,24 +479,26 @@
       const getProductPrice = (id) => productsMap.get(id)?.price;
       const getProductCategory = (id) => productsMap.get(id)?.category;
 
-      // 상품 재고 업데이트
+      // 상품 재고 업데이트 (트랜잭션)
       const updateStock = async (itemId, delta) => {
-        const updated = products.map(p => 
-          p.id === itemId ? { ...p, stock: Math.max(0, (p.stock || 0) + delta) } : p
+        await mutateProducts(currentProducts =>
+          currentProducts.map(p =>
+            p.id === itemId ? { ...p, stock: Math.max(0, (p.stock || 0) + delta) } : p
+          )
         );
-        await saveProducts(updated);
       };
 
-      // 다중 재고 업데이트
+      // 다중 재고 업데이트 (트랜잭션)
       const updateMultipleStock = async (changes) => {
         // changes: { itemId: delta, ... }
-        const updated = products.map(p => {
-          if (changes[p.id] !== undefined) {
-            return { ...p, stock: Math.max(0, (p.stock || 0) + changes[p.id]) };
-          }
-          return p;
-        });
-        await saveProducts(updated);
+        await mutateProducts(currentProducts =>
+          currentProducts.map(p => {
+            if (changes[p.id] !== undefined) {
+              return { ...p, stock: Math.max(0, (p.stock || 0) + changes[p.id]) };
+            }
+            return p;
+          })
+        );
       };
 
       // ============ 가격 계산 ============
@@ -467,17 +531,17 @@
         return total;
       };
 
-      const calculateTax = (basePrice, method, cType) => 
+      const calculateTax = (basePrice, method, cType) =>
         (method === 'card' && cType === 'square') ? basePrice * (taxRate / 100) : 0;
 
       // ============ 아이템 선택 ============
       const handleItemTap = (itemId) => {
         const product = getProduct(itemId);
         if (!product || product.stock <= 0) return;
-        
+
         const catItems = selectedItems[selectedCategory] || {};
         const cur = catItems[itemId] || 0;
-        
+
         if (cur < product.stock) {
           saleDispatch({ type: 'ADD_ITEM', category: selectedCategory, id: itemId });
         }
@@ -487,12 +551,12 @@
         saleDispatch({ type: 'DECREASE_ITEM', category: categoryId, id: itemId });
       };
 
-      const clearSelection = () => { 
+      const clearSelection = () => {
         saleDispatch({ type: 'CLEAR' });
       };
 
       const getTotalQuantity = () => {
-        return Object.values(selectedItems).reduce((total, catItems) => 
+        return Object.values(selectedItems).reduce((total, catItems) =>
           total + Object.values(catItems).reduce((s, q) => s + q, 0), 0);
       };
 
@@ -500,30 +564,29 @@
       const handleSale = async () => {
         const totalQty = getTotalQuantity();
         if (totalQty === 0 || isSaleProcessing) return;
-        
+
         setIsSaleProcessing(true);
-        
+
         try {
           const calcPrice = calculateTotalPrice();
           const finalBase = useCustomSalePrice ? customSalePrice : calcPrice;
-          const rawTax = useCustomSalePrice 
-            ? (addTaxToCustom ? calculateTax(customSalePrice, paymentMethod, cardType) : 0) 
+          const rawTax = useCustomSalePrice
+            ? (addTaxToCustom ? calculateTax(customSalePrice, paymentMethod, cardType) : 0)
             : calculateTax(calcPrice, paymentMethod, cardType);
-          const tax = Math.round(rawTax * 100) / 100; // 소수점 2자리 정리
+          const tax = Math.round(rawTax * 100) / 100;
           const finalPrice = Math.round((finalBase + tax) * 100) / 100;
 
           const includedCategories = Object.keys(selectedItems);
           const isMixed = includedCategories.length > 1;
 
-          // 🆕 읽기 쉬운 아이템 상세 배열
           const itemDetails = [];
           const stockChanges = {};
-          
+
           Object.entries(selectedItems).forEach(([catId, catItems]) => {
             Object.entries(catItems).forEach(([id, qty]) => {
               const product = getProduct(id);
               const category = categories.find(c => c.id === catId);
-              
+
               itemDetails.push({
                 id,
                 name: product?.name || id,
@@ -532,50 +595,62 @@
                 qty,
                 ...(product?.price && { unitPrice: product.price, subtotal: product.price * qty })
               });
-              
+
               stockChanges[id] = -qty;
             });
           });
 
-          // 카테고리명 (복합인 경우)
           const categoryNames = includedCategories
             .map(c => categories.find(cat => cat.id === c)?.name)
             .join(' + ');
 
-          // 🆕 개선된 판매 기록 구조
+          // 🆕 멱등성 키 (idempotency key) - 중복 저장 방지
+          const idempotencyKey = 'ik_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+
           const newSale = {
             id: Date.now(),
+            idempotencyKey,
             timestamp: new Date().toISOString(),
             status: 'active',
-            
-            // 카테고리 정보
+
             category: {
               id: isMixed ? 'mixed' : includedCategories[0],
               name: isMixed ? categoryNames : categories.find(c => c.id === includedCategories[0])?.name,
               isMixed
             },
-            
-            // 🆕 읽기 쉬운 아이템 목록
+
             itemDetails,
-            
-            // 금액 정보
+
             totalQty,
             basePrice: Math.round(finalBase * 100) / 100,
             tax,
             price: finalPrice,
-            
-            // 🆕 결제 정보 그룹화
+
             payment: {
               method: paymentMethod,
               ...(paymentMethod === 'card' && { type: cardType })
             },
-            
-            // 메모 (값이 있을 때만)
+
             ...(saleMemo.trim() && { memo: saleMemo.trim() })
           };
 
           await updateMultipleStock(stockChanges);
-          await saveSales([newSale, ...sales]);
+          try {
+            // 🆕 트랜잭션 + 멱등성 키로 중복 방지
+            await mutateSales(currentSales => {
+              if (currentSales.some(s => s.idempotencyKey === idempotencyKey)) {
+                return currentSales; // 이미 존재하면 추가하지 않음
+              }
+              return [newSale, ...currentSales];
+            });
+          } catch (saleError) {
+            // 🆕 판매 저장 실패 시 재고 롤백
+            console.error('Sale save failed, rolling back stock:', saleError);
+            const rollback = {};
+            Object.entries(stockChanges).forEach(([id, delta]) => { rollback[id] = -delta; });
+            await updateMultipleStock(rollback);
+            throw saleError;
+          }
           await addLog('sale_created', {
             saleId: newSale.id,
             categories: includedCategories,
@@ -585,6 +660,9 @@
           });
 
           saleDispatch({ type: 'CLEAR' });
+        } catch (error) {
+          console.error('Sale error:', error);
+          alert(lang === 'ko' ? '판매 처리 중 오류가 발생했습니다.' : 'Error processing sale.');
         } finally {
           setIsSaleProcessing(false);
         }
@@ -592,10 +670,35 @@
 
       // ============ 판매 취소 ============
       const handleCancelSale = async (sale) => {
+        // 🆕 이미 취소된 판매 중복 체크
+        if (sale.status === 'cancelled') {
+          alert(lang === 'ko' ? '이미 취소된 판매입니다.' : 'This sale is already cancelled.');
+          return;
+        }
         try {
-          const stockChanges = {};
+          // 🆕 트랜잭션으로 취소 + 중복 방지
+          let alreadyCancelled = false;
+          await mutateSales(currentSales =>
+            currentSales.map(s => {
+              if (s.id === sale.id) {
+                if (s.status === 'cancelled') {
+                  alreadyCancelled = true;
+                  return s; // 이미 취소됨, 변경 없음
+                }
+                return { ...s, status: 'cancelled', cancelledAt: new Date().toISOString() };
+              }
+              return s;
+            })
+          );
 
-          // 새 구조 (itemDetails 배열) 또는 기존 구조 (items 객체) 호환
+          // 이미 취소된 경우 재고 복원 건너뛰기
+          if (alreadyCancelled) {
+            alert(lang === 'ko' ? '이미 다른 기기에서 취소되었습니다.' : 'Already cancelled from another device.');
+            return;
+          }
+
+          // 취소 확정 후 재고 복원
+          const stockChanges = {};
           if (sale.itemDetails) {
             sale.itemDetails.forEach(item => {
               stockChanges[item.id] = item.qty;
@@ -605,11 +708,8 @@
               stockChanges[id] = q;
             });
           }
-
           await updateMultipleStock(stockChanges);
-          await saveSales(sales.map(s =>
-            s.id === sale.id ? { ...sale, status: 'cancelled', cancelledAt: new Date().toISOString() } : s
-          ));
+
           await addLog('sale_cancelled', {
             saleId: sale.id,
             itemDetails: sale.itemDetails?.map(i => ({ name: i.name, qty: i.qty })) || Object.entries(sale.items || {}).map(([id, qty]) => ({ name: getProductName(id), qty })),
@@ -656,106 +756,107 @@
         if (totalQty === 0) return;
         try {
 
-        const oldSale = editingSale;
-        const oldItems = getSaleItems(oldSale);
-        
-        // 가격 계산
-        let calcPrice = 0;
-        const newItemDetails = [];
-        
-        Object.entries(editItems).forEach(([id, qty]) => {
-          const product = getProduct(id);
-          if (product) {
-            if (product.category !== 'clicker') {
-              calcPrice += (product.price || 0) * qty;
+          const oldSale = editingSale;
+          const oldItems = getSaleItems(oldSale);
+
+          // 가격 계산
+          let calcPrice = 0;
+          const newItemDetails = [];
+
+          Object.entries(editItems).forEach(([id, qty]) => {
+            const product = getProduct(id);
+            if (product) {
+              if (product.category !== 'clicker') {
+                calcPrice += (product.price || 0) * qty;
+              }
+              newItemDetails.push({
+                id,
+                name: product.name,
+                category: product.category,
+                categoryName: categories.find(c => c.id === product.category)?.name,
+                qty,
+                ...(product.price && { unitPrice: product.price, subtotal: product.price * qty })
+              });
             }
-            newItemDetails.push({
-              id,
-              name: product.name,
-              category: product.category,
-              categoryName: categories.find(c => c.id === product.category)?.name,
-              qty,
-              ...(product.price && { unitPrice: product.price, subtotal: product.price * qty })
-            });
-          }
-        });
-        
-        // 클리커 가격 계산
-        const clickerQty = Object.entries(editItems).reduce((sum, [id, qty]) => {
-          const p = getProduct(id);
-          return p?.category === 'clicker' ? sum + qty : sum;
-        }, 0);
-        calcPrice += calculateClickerPrice(clickerQty);
+          });
 
-        // 스티커 가격 계산
-        const stickerQty = Object.entries(editItems).reduce((sum, [id, qty]) => {
-          const p = getProduct(id);
-          return p?.category === 'sticker' ? sum + qty : sum;
-        }, 0);
-        calcPrice += calculateStickerPrice(stickerQty);
+          // 클리커 가격 계산
+          const clickerQty = Object.entries(editItems).reduce((sum, [id, qty]) => {
+            const p = getProduct(id);
+            return p?.category === 'clicker' ? sum + qty : sum;
+          }, 0);
+          calcPrice += calculateClickerPrice(clickerQty);
 
-        const basePriceVal = useCustomPrice ? editPrice : calcPrice;
-        const rawTax = useCustomPrice ? 0 : calculateTax(calcPrice, editPaymentMethod, editCardType);
-        const tax = Math.round(rawTax * 100) / 100;
-        const finalPrice = Math.round((basePriceVal + tax) * 100) / 100;
+          // 스티커 가격 계산
+          const stickerQty = Object.entries(editItems).reduce((sum, [id, qty]) => {
+            const p = getProduct(id);
+            return p?.category === 'sticker' ? sum + qty : sum;
+          }, 0);
+          calcPrice += calculateStickerPrice(stickerQty);
 
-        // 재고 조정
-        const stockChanges = {};
-        Object.entries(oldItems).forEach(([id, q]) => {
-          stockChanges[id] = (stockChanges[id] || 0) + q;
-        });
-        Object.entries(editItems).forEach(([id, q]) => {
-          stockChanges[id] = (stockChanges[id] || 0) - q;
-        });
+          const basePriceVal = useCustomPrice ? editPrice : calcPrice;
+          const rawTax = useCustomPrice ? 0 : calculateTax(calcPrice, editPaymentMethod, editCardType);
+          const tax = Math.round(rawTax * 100) / 100;
+          const finalPrice = Math.round((basePriceVal + tax) * 100) / 100;
 
-        // 카테고리 정보
-        const editCategoryIds = [...new Set(newItemDetails.map(i => i.category))];
-        const isMixed = editCategoryIds.length > 1;
-        const categoryNames = editCategoryIds.map(cId => categories.find(cat => cat.id === cId)?.name).join(' + ');
+          // 재고 조정
+          const stockChanges = {};
+          Object.entries(oldItems).forEach(([id, q]) => {
+            stockChanges[id] = (stockChanges[id] || 0) + q;
+          });
+          Object.entries(editItems).forEach(([id, q]) => {
+            stockChanges[id] = (stockChanges[id] || 0) - q;
+          });
 
-        // 🆕 개선된 구조로 저장
-        const updatedSale = {
-          id: oldSale.id,
-          timestamp: oldSale.timestamp,
-          status: oldSale.status,
-          
-          category: {
-            id: isMixed ? 'mixed' : editCategoryIds[0],
-            name: isMixed ? categoryNames : categories.find(c => c.id === editCategoryIds[0])?.name,
-            isMixed
-          },
-          
-          itemDetails: newItemDetails,
-          
-          totalQty,
-          basePrice: Math.round(basePriceVal * 100) / 100,
-          tax,
-          price: finalPrice,
-          
-          payment: {
-            method: editPaymentMethod,
-            ...(editPaymentMethod === 'card' && { type: editCardType })
-          },
-          
-          ...(editMemo.trim() && { memo: editMemo.trim() }),
-          modifiedAt: new Date().toISOString()
-        };
+          // 카테고리 정보
+          const editCategoryIds = [...new Set(newItemDetails.map(i => i.category))];
+          const isMixed = editCategoryIds.length > 1;
+          const categoryNames = editCategoryIds.map(cId => categories.find(cat => cat.id === cId)?.name).join(' + ');
 
-        await updateMultipleStock(stockChanges);
-        await saveSales(sales.map(s => s.id === oldSale.id ? updatedSale : s));
-        await addLog('sale_edited', {
-          saleId: oldSale.id,
-          before: { 
-            items: oldSale.itemDetails?.map(i => ({ name: i.name, qty: i.qty })) || Object.entries(oldItems).map(([id, qty]) => ({ name: getProductName(id), qty })),
-            price: oldSale.price 
-          },
-          after: { 
-            items: newItemDetails.map(i => ({ name: i.name, qty: i.qty })),
-            price: finalPrice 
-          }
-        });
+          // 🆕 개선된 구조로 저장
+          const updatedSale = {
+            id: oldSale.id,
+            timestamp: oldSale.timestamp,
+            status: oldSale.status,
 
-        editDispatch({ type: 'CLOSE_EDIT' });
+            category: {
+              id: isMixed ? 'mixed' : editCategoryIds[0],
+              name: isMixed ? categoryNames : categories.find(c => c.id === editCategoryIds[0])?.name,
+              isMixed
+            },
+
+            itemDetails: newItemDetails,
+
+            totalQty,
+            basePrice: Math.round(basePriceVal * 100) / 100,
+            tax,
+            price: finalPrice,
+
+            payment: {
+              method: editPaymentMethod,
+              ...(editPaymentMethod === 'card' && { type: editCardType })
+            },
+
+            ...(editMemo.trim() && { memo: editMemo.trim() }),
+            modifiedAt: new Date().toISOString()
+          };
+
+          await updateMultipleStock(stockChanges);
+          // 🆕 트랜잭션으로 수정 저장
+          await mutateSales(currentSales => currentSales.map(s => s.id === oldSale.id ? updatedSale : s));
+          await addLog('sale_edited', {
+            saleId: oldSale.id,
+            before: {
+              items: oldSale.itemDetails?.map(i => ({ name: i.name, qty: i.qty })) || Object.entries(oldItems).map(([id, qty]) => ({ name: getProductName(id), qty })),
+              price: oldSale.price
+            },
+            after: {
+              items: newItemDetails.map(i => ({ name: i.name, qty: i.qty })),
+              price: finalPrice
+            }
+          });
+
+          editDispatch({ type: 'CLOSE_EDIT' });
         } catch (error) {
           console.error('Edit sale error:', error);
           alert(lang === 'ko' ? '판매 수정 중 오류가 발생했습니다.' : 'Error editing sale.');
@@ -765,7 +866,7 @@
       // ============ 카테고리 관리 ============
       const handleAddCategory = async () => {
         if (!newCategoryName.trim()) return;
-        
+
         const newId = 'cat_' + Date.now();
         const newCategory = {
           id: newId,
@@ -773,28 +874,28 @@
           emoji: newCategoryEmoji || '📦',
           priceType: 'fixed'  // 새 카테고리는 무조건 고정 가격
         };
-        
-        await saveCategories([...categories, newCategory]);
+
+        await mutateCategories(currentCategories => [...currentCategories, newCategory]);
         resetCategoryForm();
         setShowCategoryModal(false);
       };
 
       const handleEditCategory = async () => {
         if (!editingCategory || !newCategoryName.trim()) return;
-        
-        const updated = categories.map(c => {
-          if (c.id === editingCategory.id) {
-            return {
-              ...c,
-              name: newCategoryName.trim(),
-              emoji: newCategoryEmoji || '📦'
-              // priceType은 기존 값 유지 (clicker/sticker 알고리즘 보호)
-            };
-          }
-          return c;
-        });
-        
-        await saveCategories(updated);
+
+        await mutateCategories(currentCategories =>
+          currentCategories.map(c => {
+            if (c.id === editingCategory.id) {
+              return {
+                ...c,
+                name: newCategoryName.trim(),
+                emoji: newCategoryEmoji || '📦'
+                // priceType은 기존 값 유지 (clicker/sticker 알고리즘 보호)
+              };
+            }
+            return c;
+          })
+        );
         resetCategoryForm();
         setShowCategoryModal(false);
       };
@@ -806,8 +907,8 @@
           alert(lang === 'ko' ? '이 카테고리에 상품이 있어서 삭제할 수 없습니다.' : 'Cannot delete category with products.');
           return;
         }
-        
-        await saveCategories(categories.filter(c => c.id !== categoryId));
+
+        await mutateCategories(currentCategories => currentCategories.filter(c => c.id !== categoryId));
         if (selectedCategory === categoryId && categories.length > 1) {
           setSelectedCategory(categories[0].id);
         }
@@ -830,7 +931,7 @@
       // ============ 상품 관리 ============
       const handleAddProduct = async () => {
         if (!newProductName.trim()) return;
-        
+
         const category = categories.find(c => c.id === selectedCategory);
         const newProduct = {
           id: generateId(),
@@ -838,12 +939,12 @@
           category: selectedCategory,
           stock: 10
         };
-        
+
         if (category?.priceType === 'fixed') {
           newProduct.price = newProductPrice;
         }
 
-        await saveProducts([...products, newProduct]);
+        await mutateProducts(currentProducts => [...currentProducts, newProduct]);
         setNewProductName('');
         setNewProductPrice(10);
       };
@@ -854,35 +955,37 @@
         const productCat = categories.find(c => c.id === product.category);
         const isFixed = productCat?.priceType === 'fixed';
 
-        const updated = products.map(p => {
-          if (p.id === product.id) {
-            const result = { ...p, name: newName.trim() };
-            if (newPrice !== undefined && (p.price !== undefined || isFixed)) {
-              result.price = newPrice;
+        await mutateProducts(currentProducts =>
+          currentProducts.map(p => {
+            if (p.id === product.id) {
+              const result = { ...p, name: newName.trim() };
+              if (newPrice !== undefined && (p.price !== undefined || isFixed)) {
+                result.price = newPrice;
+              }
+              return result;
             }
-            return result;
-          }
-          return p;
-        });
-
-        await saveProducts(updated);
+            return p;
+          })
+        );
         setEditingProduct(null);
       };
 
       const handleDeleteProduct = async (product) => {
-        await saveProducts(products.filter(p => p.id !== product.id));
+        await mutateProducts(currentProducts => currentProducts.filter(p => p.id !== product.id));
       };
 
       const handleUpdateStock = async (productId, newStock) => {
-        const updated = products.map(p => 
-          p.id === productId ? { ...p, stock: parseInt(newStock) || 0 } : p
+        await mutateProducts(currentProducts =>
+          currentProducts.map(p =>
+            p.id === productId ? { ...p, stock: parseInt(newStock) || 0 } : p
+          )
         );
-        await saveProducts(updated);
       };
 
       // ============ 마감 처리 ============
       const handleDayClose = async () => {
-        if (sales.length === 0) { setShowCloseModal(false); return; }
+        if (sales.length === 0 || isClosing) { if (sales.length === 0) setShowCloseModal(false); return; }
+        setIsClosing(true);
         try {
           const newRecord = {
             id: Date.now(),
@@ -894,40 +997,114 @@
             productsSnapshot: products.map(p => ({ id: p.id, name: p.name, stock: p.stock }))
           };
 
-          await saveDailyRecords([newRecord, ...dailyRecords]);
+          await mutateDailyRecords(currentRecords => [newRecord, ...currentRecords]);
           await saveSales([]);
           setShowCloseModal(false);
         } catch (error) {
           console.error('Day close error:', error);
           alert(lang === 'ko' ? '마감 처리 중 오류가 발생했습니다.' : 'Error closing day.');
+        } finally {
+          setIsClosing(false);
         }
       };
 
-      const handleRestoreSales = async (record) => {
-        try {
-        if (sales.length > 0) {
-          const cr = {
-            id: Date.now(),
-            date: new Date(sales[0].timestamp).toISOString(),
-            dateString: new Date(sales[0].timestamp).toDateString(),
-            location: localLocation || '',
-            sales: [...sales],
-            summary: calculateSummary(sales)
-          };
-          let ur = [...dailyRecords];
-          const idx = ur.findIndex(r => r.dateString === cr.dateString);
-          if (idx >= 0) ur[idx] = cr;
-          else ur = [cr, ...ur];
-          ur = ur.filter(r => r.id !== record.id);
-          await saveDailyRecords(ur);
-        } else {
-          await saveDailyRecords(dailyRecords.filter(r => r.id !== record.id));
-        }
-
-        await saveSales([...record.sales]);
+      // ============ 기록 관리 (보관/복원/삭제/병합) ============
+      const handleArchiveRecord = async (record) => {
+        if (!confirm(t.archiveConfirm)) return;
+        await mutateDailyRecords(currentRecords =>
+          currentRecords.map(r => r.id === record.id ? { ...r, status: 'archived', archivedAt: new Date().toISOString() } : r)
+        );
         setViewingRecord(null);
-        setActiveTab('sales');
-        setShowSalesHistory(true);
+      };
+
+      const handleUnarchiveRecord = async (record) => {
+        await mutateDailyRecords(currentRecords =>
+          currentRecords.map(r => r.id === record.id ? { ...r, status: undefined, archivedAt: undefined } : r)
+        );
+      };
+
+      const handlePermanentDelete = async (record) => {
+        const confirmText = lang === 'ko' ? '삭제' : 'DELETE';
+        const input = prompt(lang === 'ko'
+          ? `완전 삭제하려면 "${confirmText}"를 입력하세요:`
+          : `Type "${confirmText}" to permanently delete:`);
+        if (input !== confirmText) return;
+        await mutateDailyRecords(currentRecords => currentRecords.filter(r => r.id !== record.id));
+      };
+
+      const handleMergeRecords = async (dateString) => {
+        if (!confirm(t.mergeConfirm)) return;
+        await mutateDailyRecords(currentRecords => {
+          const toMerge = currentRecords.filter(r => r.dateString === dateString && r.status !== 'archived');
+          if (toMerge.length < 2) return currentRecords;
+
+          const allSales = toMerge.flatMap(r => r.sales || []);
+          // 중복 판매 제거 (같은 id)
+          const uniqueSales = [];
+          const seenIds = new Set();
+          allSales.forEach(s => {
+            if (!seenIds.has(s.id)) {
+              seenIds.add(s.id);
+              uniqueSales.push(s);
+            }
+          });
+
+          const merged = {
+            ...toMerge[0],
+            sales: uniqueSales,
+            summary: calculateSummary(uniqueSales),
+            location: toMerge.map(r => r.location).filter(Boolean).join(', '),
+            mergedAt: new Date().toISOString(),
+            mergedFrom: toMerge.map(r => r.id)
+          };
+
+          const mergeIds = new Set(toMerge.map(r => r.id));
+          return [merged, ...currentRecords.filter(r => !mergeIds.has(r.id))];
+        });
+      };
+
+      const handleRestoreSales = async (record) => {
+        // 🆕 재고 불일치 경고
+        if (record.productsSnapshot) {
+          const diffs = [];
+          record.productsSnapshot.forEach(snap => {
+            const current = getProduct(snap.id);
+            if (current && current.stock !== snap.stock) {
+              diffs.push(`${snap.name}: ${lang === 'ko' ? '마감 시' : 'at close'} ${snap.stock} → ${lang === 'ko' ? '현재' : 'now'} ${current.stock}`);
+            }
+          });
+          if (diffs.length > 0) {
+            const msg = lang === 'ko'
+              ? `⚠️ 재고가 변경되었습니다:\n${diffs.join('\n')}\n\n복원된 판매를 취소하면 재고가 추가로 복원됩니다.\n계속하시겠습니까?`
+              : `⚠️ Stock has changed since close:\n${diffs.join('\n')}\n\nCancelling restored sales will further adjust stock.\nContinue?`;
+            if (!confirm(msg)) return;
+          }
+        }
+        try {
+          if (sales.length > 0) {
+            const cr = {
+              id: Date.now(),
+              date: new Date(sales[0].timestamp).toISOString(),
+              dateString: new Date(sales[0].timestamp).toDateString(),
+              location: localLocation || '',
+              sales: [...sales],
+              summary: calculateSummary(sales)
+            };
+            await mutateDailyRecords(currentRecords => {
+              let ur = [...currentRecords];
+              const idx = ur.findIndex(r => r.dateString === cr.dateString);
+              if (idx >= 0) ur[idx] = cr;
+              else ur = [cr, ...ur];
+              return ur.filter(r => r.id !== record.id);
+            });
+          } else {
+            await mutateDailyRecords(currentRecords => currentRecords.filter(r => r.id !== record.id));
+          }
+
+          await saveSales([...record.sales]);
+          setViewingRecord(null);
+          setActiveTab('sales');
+          setShowSalesHistory(true);
         } catch (error) {
           console.error('Restore sales error:', error);
           alert(lang === 'ko' ? '복구 중 오류가 발생했습니다.' : 'Error restoring sales.');
@@ -938,12 +1115,12 @@
       const recalculateAllRecords = async () => {
         if (dailyRecords.length === 0) return;
 
-        const updatedRecords = dailyRecords.map(record => ({
-          ...record,
-          summary: calculateSummary(record.sales || [])
-        }));
-
-        await saveDailyRecords(updatedRecords);
+        await mutateDailyRecords(currentRecords =>
+          currentRecords.map(record => ({
+            ...record,
+            summary: calculateSummary(record.sales || [])
+          }))
+        );
         alert(lang === 'ko' ? '기록이 재계산되었습니다!' : 'Records recalculated!');
       };
 
@@ -960,15 +1137,18 @@
 
       // ============ 세금 ============
       const handleApplyTaxRate = async () => {
-        const updatedSales = sales.map(sale => {
-          if (sale.paymentMethod === 'card' && sale.cardType === 'square') {
-            const basePrice = sale.basePrice || sale.price;
-            const newTax = basePrice * (taxRate / 100);
-            return { ...sale, basePrice, tax: newTax, price: basePrice + newTax };
-          }
-          return sale;
-        });
-        await saveSales(updatedSales);
+        await mutateSales(currentSales =>
+          currentSales.map(sale => {
+            const pm = sale.payment?.method || sale.paymentMethod;
+            const ct = sale.payment?.type || sale.cardType;
+            if (pm === 'card' && ct === 'square') {
+              const basePrice = sale.basePrice || sale.price;
+              const newTax = basePrice * (taxRate / 100);
+              return { ...sale, basePrice, tax: newTax, price: basePrice + newTax };
+            }
+            return sale;
+          })
+        );
       };
 
       // ============ 통계 ============
@@ -991,7 +1171,7 @@
       const getStatsData = () => {
         let startDate, endDate = new Date();
         endDate.setHours(23, 59, 59, 999);
-        
+
         if (statsPeriod === 'week') {
           startDate = new Date();
           startDate.setDate(startDate.getDate() - 7);
@@ -1049,7 +1229,7 @@
         const headers = ['Date', 'Time', 'Category', 'Items', 'Qty', 'Base', 'Tax', 'Total', 'Payment', 'Type', 'Status', 'Memo'];
         const rows = allSales.map(sale => {
           const d = new Date(sale.timestamp);
-          
+
           // 새/구 구조 호환
           let itemList;
           if (sale.itemDetails) {
@@ -1059,12 +1239,12 @@
           } else {
             itemList = '';
           }
-          
+
           const catName = sale.category?.name || sale.categoryName || '';
           const totalQty = sale.totalQty || sale.totalQuantity || 0;
           const paymentMethod = sale.payment?.method || sale.paymentMethod;
           const cardType = sale.payment?.type || sale.cardType;
-          
+
           return [
             d.toLocaleDateString('en-US'),
             d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
@@ -1132,22 +1312,22 @@
       };
 
       // ============ 계산된 값들 (메모이제이션) ============
-      
+
       // 현재 통계 - sales나 lang이 바뀔 때만 다시 계산
       const currentStats = useMemo(() => getCurrentStats(), [sales, lang]);
-      
+
       // 총 수량 - selectedItems가 바뀔 때만 다시 계산
       const totalQuantity = useMemo(() => getTotalQuantity(), [selectedItems]);
-      
+
       // 기본 가격 - selectedItems가 바뀔 때만 다시 계산
       const basePrice = useMemo(() => calculateTotalPrice(), [selectedItems, productsMap]);
-      
+
       // 세금 - 관련 값이 바뀔 때만 다시 계산
-      const currentTax = useMemo(() => 
-        calculateTax(basePrice, paymentMethod, cardType), 
+      const currentTax = useMemo(() =>
+        calculateTax(basePrice, paymentMethod, cardType),
         [basePrice, paymentMethod, cardType, taxRate]
       );
-      
+
       // 최종 가격
       const totalPrice = useMemo(() => basePrice + currentTax, [basePrice, currentTax]);
 
@@ -1162,9 +1342,14 @@
       // ============ UI 렌더링 ============
       return (
         <div className="min-h-screen bg-gray-100">
-          {/* 상태 바 */}
-          <div className="text-center text-xs py-1 bg-green-100 text-green-800">{t.firebaseMode}</div>
-          
+          {/* 네트워크 상태 바 */}
+          <div className={`text-center text-xs py-1 transition-colors duration-300 ${!networkStatus.isOnline ? 'bg-red-100 text-red-800' :
+            networkStatus.isSyncing ? 'bg-yellow-100 text-yellow-800' :
+              'bg-green-100 text-green-800'
+            }`}>
+            {!networkStatus.isOnline ? t.offline : networkStatus.isSyncing ? t.syncing : t.online}
+          </div>
+
           {/* 탭 네비게이션 */}
           <div className="bg-white border-b sticky top-0 z-40">
             <div className="max-w-lg mx-auto flex">
@@ -1175,7 +1360,7 @@
           </div>
 
           <div className="p-4"><div className="max-w-lg mx-auto">
-            
+
             {/* ========== 판매 탭 ========== */}
             {activeTab === 'sales' && (<>
               {/* 헤더 */}
@@ -1231,9 +1416,9 @@
                     const catItems = selectedItems[cat.id] || {};
                     const catQty = Object.values(catItems).reduce((s, q) => s + q, 0);
                     return (
-                      <button 
-                        key={cat.id} 
-                        onClick={() => setSelectedCategory(cat.id)} 
+                      <button
+                        key={cat.id}
+                        onClick={() => setSelectedCategory(cat.id)}
                         onDoubleClick={() => startEditCategory(cat)}
                         className={`flex-shrink-0 p-2 rounded-lg border-2 text-xs relative ${selectedCategory === cat.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200'}`}
                       >
@@ -1242,7 +1427,7 @@
                       </button>
                     );
                   })}
-                  <button 
+                  <button
                     onClick={() => { resetCategoryForm(); setShowCategoryModal(true); }}
                     className="flex-shrink-0 p-2 rounded-lg border-2 border-dashed border-gray-300 text-xs text-gray-500 hover:border-blue-400 hover:text-blue-500"
                   >
@@ -1309,7 +1494,7 @@
 
                 {/* 메모 */}
                 <div className="mb-4">
-                  <input type="text" value={saleMemo} onChange={e => saleDispatch({ type: 'SET_MEMO', value: e.target.value })} placeholder={`📝 ${t.memo}`} className="w-full p-2 border rounded-lg text-sm"/>
+                  <input type="text" value={saleMemo} onChange={e => saleDispatch({ type: 'SET_MEMO', value: e.target.value })} placeholder={`📝 ${t.memo}`} className="w-full p-2 border rounded-lg text-sm" />
                 </div>
 
                 {/* 결제 방식 */}
@@ -1338,13 +1523,13 @@
                     <div className="flex justify-between items-center">
                       <span className="text-sm font-medium">{t.total}:</span>
                       <label className="flex items-center gap-2 text-sm">
-                        <input type="checkbox" checked={useCustomSalePrice} onChange={e => { 
-                          saleDispatch({ type: 'SET_USE_CUSTOM_PRICE', value: e.target.checked }); 
-                          if (!e.target.checked) { 
-                            saleDispatch({ type: 'SET_CUSTOM_PRICE', value: basePrice }); 
-                            saleDispatch({ type: 'SET_ADD_TAX', value: false }); 
-                          } 
-                        }} className="w-4 h-4"/>
+                        <input type="checkbox" checked={useCustomSalePrice} onChange={e => {
+                          saleDispatch({ type: 'SET_USE_CUSTOM_PRICE', value: e.target.checked });
+                          if (!e.target.checked) {
+                            saleDispatch({ type: 'SET_CUSTOM_PRICE', value: basePrice });
+                            saleDispatch({ type: 'SET_ADD_TAX', value: false });
+                          }
+                        }} className="w-4 h-4" />
                         {t.customInput}
                       </label>
                     </div>
@@ -1352,7 +1537,7 @@
                       <div className="mt-2">
                         <div className="flex items-center justify-center gap-2">
                           <span className="text-2xl">$</span>
-                          <input type="number" min="0" step="0.01" value={customSalePrice} onChange={e => saleDispatch({ type: 'SET_CUSTOM_PRICE', value: parseFloat(e.target.value) || 0 })} className="w-28 p-2 text-2xl font-bold text-center border rounded-lg"/>
+                          <input type="number" min="0" step="0.01" value={customSalePrice} onChange={e => saleDispatch({ type: 'SET_CUSTOM_PRICE', value: parseFloat(e.target.value) || 0 })} className="w-28 p-2 text-2xl font-bold text-center border rounded-lg" />
                         </div>
                         <div className="flex justify-center mt-2">
                           <button onClick={() => saleDispatch({ type: 'SET_ADD_TAX', value: !addTaxToCustom })} className={`px-3 py-1 rounded-full text-sm font-medium ${addTaxToCustom ? 'bg-orange-500 text-white' : 'bg-orange-100 text-orange-700'}`}>
@@ -1381,28 +1566,27 @@
                 )}
 
                 {/* 판매 버튼 */}
-                <button 
-                  onClick={handleSale} 
-                  disabled={totalQuantity === 0 || isSaleProcessing} 
-                  className={`w-full py-4 rounded-xl text-white font-bold text-lg transition-all ${
-                    isSaleProcessing 
-                      ? 'bg-yellow-500 animate-pulse' 
-                      : totalQuantity === 0 
-                        ? 'bg-gray-300' 
-                        : 'bg-gradient-to-r from-green-500 to-emerald-600 shadow-lg'
-                  }`}
+                <button
+                  onClick={handleSale}
+                  disabled={totalQuantity === 0 || isSaleProcessing}
+                  className={`w-full py-4 rounded-xl text-white font-bold text-lg transition-all ${isSaleProcessing
+                    ? 'bg-yellow-500 animate-pulse'
+                    : totalQuantity === 0
+                      ? 'bg-gray-300'
+                      : 'bg-gradient-to-r from-green-500 to-emerald-600 shadow-lg'
+                    }`}
                 >
-                  {isSaleProcessing 
-                    ? (lang === 'ko' ? '⏳ 처리 중...' : '⏳ Processing...') 
-                    : totalQuantity === 0 
-                      ? t.selectProduct 
+                  {isSaleProcessing
+                    ? (lang === 'ko' ? '⏳ 처리 중...' : '⏳ Processing...')
+                    : totalQuantity === 0
+                      ? t.selectProduct
                       : formatCurrency(
-                          useCustomSalePrice 
-                            ? (addTaxToCustom && paymentMethod === 'card' && cardType === 'square' 
-                                ? customSalePrice + customSalePrice * (taxRate / 100) 
-                                : customSalePrice)
-                            : totalPrice
-                        ) + ' ' + t.saleComplete + ' ✓'}
+                        useCustomSalePrice
+                          ? (addTaxToCustom && paymentMethod === 'card' && cardType === 'square'
+                            ? customSalePrice + customSalePrice * (taxRate / 100)
+                            : customSalePrice)
+                          : totalPrice
+                      ) + ' ' + t.saleComplete + ' ✓'}
                 </button>
               </div>
 
@@ -1487,47 +1671,112 @@
                 </button>
               </div>
 
-              {dailyRecords.length === 0 ? (
-                <div className="bg-white rounded-xl p-8 text-center shadow-sm">
-                  <div className="text-4xl mb-4">📭</div>
-                  <p className="text-gray-500">{t.noClosedRecord}</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {dailyRecords.map(record => (
-                    <div key={record.id} className="bg-white rounded-xl p-4 shadow-sm">
-                      <div className="flex justify-between mb-3">
-                        <div>
-                          <div className="font-bold text-lg">{formatDate(record.date, lang)}</div>
-                          {record.location && <div className="text-xs text-gray-500">📍 {record.location}</div>}
-                          <div className="text-sm text-gray-500">{record.summary.transactionCount}{t.transactions} / {record.summary.totalItems || 0}{t.items}</div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-2xl font-bold text-green-600">{formatCurrency(record.summary.totalRevenue)}</div>
-                          {record.summary.totalTax > 0 && <div className="text-xs text-orange-500">{t.tax} {formatCurrency(record.summary.totalTax)}</div>}
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 mb-3">
-                        <div className="bg-blue-50 rounded-lg p-2 text-center">
-                          <div className="text-xs text-gray-500">💵 {t.cash}</div>
-                          <div className="font-semibold text-blue-600">{formatCurrency(record.summary.cashRevenue)}</div>
-                        </div>
-                        <div 
-                          className="bg-purple-50 rounded-lg p-2 text-center cursor-pointer hover:bg-purple-100"
-                          onClick={() => { setSelectedRecordForCard(record); setShowCardDetailModal(true); }}
-                        >
-                          <div className="text-xs text-gray-500">💳 {t.card} ▾</div>
-                          <div className="font-semibold text-purple-600">{formatCurrency(record.summary.cardRevenue)}</div>
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        <button onClick={() => setViewingRecord(record)} className="flex-1 text-sm py-2 bg-gray-100 rounded-lg">📋 {t.detail}</button>
-                        <button onClick={() => handleRestoreSales(record)} className="flex-1 text-sm py-2 bg-orange-100 text-orange-700 rounded-lg">↩️ {t.restore}</button>
+              {(() => {
+                const activeRecords = dailyRecords.filter(r => r.status !== 'archived');
+                const archivedRecords = dailyRecords.filter(r => r.status === 'archived');
+
+                // 중복 날짜 찾기
+                const dateCounts = {};
+                activeRecords.forEach(r => {
+                  dateCounts[r.dateString] = (dateCounts[r.dateString] || 0) + 1;
+                });
+                const hasDuplicates = Object.values(dateCounts).some(c => c > 1);
+
+                return (<>
+                  {/* 중복 병합 버튼 */}
+                  {hasDuplicates && (
+                    <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-xl">
+                      <div className="text-sm font-medium text-yellow-800 mb-2">⚠️ {lang === 'ko' ? '중복 날짜 기록이 있습니다' : 'Duplicate date records found'}</div>
+                      <div className="flex gap-2 flex-wrap">
+                        {Object.entries(dateCounts).filter(([, c]) => c > 1).map(([dateStr, count]) => (
+                          <button key={dateStr} onClick={() => handleMergeRecords(dateStr)} className="text-xs px-3 py-1.5 bg-yellow-200 hover:bg-yellow-300 text-yellow-900 rounded-full font-medium">
+                            🔀 {new Date(dateStr).toLocaleDateString(lang === 'ko' ? 'ko-KR' : 'en-US', { month: 'short', day: 'numeric' })} ({count}{lang === 'ko' ? '개' : ''}) {t.mergeRecords}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                  ))}
-                </div>
-              )}
+                  )}
+
+                  {/* 활성 기록 */}
+                  {activeRecords.length === 0 ? (
+                    <div className="bg-white rounded-xl p-8 text-center shadow-sm">
+                      <div className="text-4xl mb-4">📭</div>
+                      <p className="text-gray-500">{t.noClosedRecord}</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {activeRecords.map(record => (
+                        <div key={record.id} className="bg-white rounded-xl p-4 shadow-sm">
+                          <div className="flex justify-between mb-3">
+                            <div>
+                              <div className="font-bold text-lg">{formatDate(record.date, lang)}</div>
+                              {record.location && <div className="text-xs text-gray-500">📍 {record.location}</div>}
+                              <div className="text-sm text-gray-500">{record.summary.transactionCount}{t.transactions} / {record.summary.totalItems || 0}{t.items}</div>
+                              {record.mergedFrom && <div className="text-xs text-blue-500">🔀 {lang === 'ko' ? '병합된 기록' : 'Merged record'}</div>}
+                            </div>
+                            <div className="text-right">
+                              <div className="text-2xl font-bold text-green-600">{formatCurrency(record.summary.totalRevenue)}</div>
+                              {record.summary.totalTax > 0 && <div className="text-xs text-orange-500">{t.tax} {formatCurrency(record.summary.totalTax)}</div>}
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 mb-3">
+                            <div className="bg-blue-50 rounded-lg p-2 text-center">
+                              <div className="text-xs text-gray-500">💵 {t.cash}</div>
+                              <div className="font-semibold text-blue-600">{formatCurrency(record.summary.cashRevenue)}</div>
+                            </div>
+                            <div
+                              className="bg-purple-50 rounded-lg p-2 text-center cursor-pointer hover:bg-purple-100"
+                              onClick={() => { setSelectedRecordForCard(record); setShowCardDetailModal(true); }}
+                            >
+                              <div className="text-xs text-gray-500">💳 {t.card} ▾</div>
+                              <div className="font-semibold text-purple-600">{formatCurrency(record.summary.cardRevenue)}</div>
+                            </div>
+                          </div>
+                          <div className="flex gap-2">
+                            <button onClick={() => setViewingRecord(record)} className="flex-1 text-sm py-2 bg-gray-100 rounded-lg">📋 {t.detail}</button>
+                            <button onClick={() => handleRestoreSales(record)} className="flex-1 text-sm py-2 bg-orange-100 text-orange-700 rounded-lg">↩️ {t.restore}</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* 보관된 기록 섹션 */}
+                  {archivedRecords.length > 0 && (
+                    <div className="mt-6">
+                      <button
+                        onClick={() => setShowArchivedRecords(!showArchivedRecords)}
+                        className="w-full py-3 text-sm text-gray-500 hover:text-gray-700 flex items-center justify-center gap-2"
+                      >
+                        📦 {showArchivedRecords ? t.hideArchived : t.showArchived} ({archivedRecords.length})
+                        <span>{showArchivedRecords ? '▲' : '▼'}</span>
+                      </button>
+                      {showArchivedRecords && (
+                        <div className="space-y-3 mt-2">
+                          {archivedRecords.map(record => (
+                            <div key={record.id} className="bg-gray-50 rounded-xl p-4 border border-gray-200 opacity-75">
+                              <div className="flex justify-between mb-2">
+                                <div>
+                                  <div className="font-bold text-base text-gray-600">{formatDate(record.date, lang)}</div>
+                                  {record.location && <div className="text-xs text-gray-400">📍 {record.location}</div>}
+                                  <div className="text-xs text-gray-400">📦 {lang === 'ko' ? '보관됨' : 'Archived'}: {new Date(record.archivedAt).toLocaleDateString()}</div>
+                                </div>
+                                <div className="text-right">
+                                  <div className="text-lg font-bold text-gray-500">{formatCurrency(record.summary.totalRevenue)}</div>
+                                </div>
+                              </div>
+                              <div className="flex gap-2">
+                                <button onClick={() => handleUnarchiveRecord(record)} className="flex-1 text-xs py-2 bg-blue-100 text-blue-700 rounded-lg font-medium">↩️ {t.unarchive}</button>
+                                <button onClick={() => handlePermanentDelete(record)} className="flex-1 text-xs py-2 bg-red-50 text-red-500 rounded-lg font-medium">🗑️ {t.permanentDelete}</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>);
+              })()}
 
               <div className="mt-8 pt-4 border-t">
                 <button onClick={() => setShowResetModal(true)} className="w-full py-3 text-sm text-red-500 hover:bg-red-50 rounded-lg">🗑️ {t.resetAll}</button>
@@ -1536,7 +1785,7 @@
           </div></div>
 
           {/* ========== 모달들 ========== */}
-          
+
           {/* 통계 모달 */}
           {showStatsModal && (
             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -1553,9 +1802,9 @@
                   </div>
                   {statsPeriod === 'custom' && (
                     <div className="flex gap-2">
-                      <input type="date" value={customStartDate} onChange={e => setCustomStartDate(e.target.value)} className="flex-1 p-2 border rounded-lg text-sm"/>
+                      <input type="date" value={customStartDate} onChange={e => setCustomStartDate(e.target.value)} className="flex-1 p-2 border rounded-lg text-sm" />
                       <span className="self-center">~</span>
-                      <input type="date" value={customEndDate} onChange={e => setCustomEndDate(e.target.value)} className="flex-1 p-2 border rounded-lg text-sm"/>
+                      <input type="date" value={customEndDate} onChange={e => setCustomEndDate(e.target.value)} className="flex-1 p-2 border rounded-lg text-sm" />
                     </div>
                   )}
                 </div>
@@ -1594,33 +1843,33 @@
           {showCardDetailModal && (() => {
             const stats = selectedRecordForCard ? selectedRecordForCard.summary : currentStats;
             return (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-              <div className="bg-white rounded-2xl p-6 w-full max-w-sm">
-                <h3 className="text-lg font-bold mb-4">💳 {lang === 'ko' ? '카드 상세' : 'Card Details'}</h3>
-                
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center p-3 bg-blue-50 rounded-lg">
-                    <span className="flex items-center gap-2">💙 Venmo</span>
-                    <span className="font-bold text-blue-600">{formatCurrency(stats.venmoRevenue || 0)}</span>
+              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                <div className="bg-white rounded-2xl p-6 w-full max-w-sm">
+                  <h3 className="text-lg font-bold mb-4">💳 {lang === 'ko' ? '카드 상세' : 'Card Details'}</h3>
+
+                  <div className="space-y-3">
+                    <div className="flex justify-between items-center p-3 bg-blue-50 rounded-lg">
+                      <span className="flex items-center gap-2">💙 Venmo</span>
+                      <span className="font-bold text-blue-600">{formatCurrency(stats.venmoRevenue || 0)}</span>
+                    </div>
+                    <div className="flex justify-between items-center p-3 bg-purple-50 rounded-lg">
+                      <span className="flex items-center gap-2">💜 Zelle</span>
+                      <span className="font-bold text-purple-600">{formatCurrency(stats.zelleRevenue || 0)}</span>
+                    </div>
+                    <div className="flex justify-between items-center p-3 bg-gray-100 rounded-lg">
+                      <span className="flex items-center gap-2">⬛ Square</span>
+                      <span className="font-bold text-gray-700">{formatCurrency(stats.squareRevenue || 0)}</span>
+                    </div>
                   </div>
-                  <div className="flex justify-between items-center p-3 bg-purple-50 rounded-lg">
-                    <span className="flex items-center gap-2">💜 Zelle</span>
-                    <span className="font-bold text-purple-600">{formatCurrency(stats.zelleRevenue || 0)}</span>
+
+                  <div className="mt-4 pt-4 border-t flex justify-between items-center">
+                    <span className="font-medium">{lang === 'ko' ? '카드 총합' : 'Card Total'}</span>
+                    <span className="text-xl font-bold text-purple-600">{formatCurrency(stats.cardRevenue || 0)}</span>
                   </div>
-                  <div className="flex justify-between items-center p-3 bg-gray-100 rounded-lg">
-                    <span className="flex items-center gap-2">⬛ Square</span>
-                    <span className="font-bold text-gray-700">{formatCurrency(stats.squareRevenue || 0)}</span>
-                  </div>
+
+                  <button onClick={() => { setShowCardDetailModal(false); setSelectedRecordForCard(null); }} className="w-full mt-4 py-3 bg-gray-200 rounded-xl font-medium">{t.close}</button>
                 </div>
-                
-                <div className="mt-4 pt-4 border-t flex justify-between items-center">
-                  <span className="font-medium">{lang === 'ko' ? '카드 총합' : 'Card Total'}</span>
-                  <span className="text-xl font-bold text-purple-600">{formatCurrency(stats.cardRevenue || 0)}</span>
-                </div>
-                
-                <button onClick={() => { setShowCardDetailModal(false); setSelectedRecordForCard(null); }} className="w-full mt-4 py-3 bg-gray-200 rounded-xl font-medium">{t.close}</button>
               </div>
-            </div>
             );
           })()}
 
@@ -1631,44 +1880,44 @@
                 <h3 className="text-lg font-bold mb-4">
                   {editingCategory ? '✏️ ' + (lang === 'ko' ? '카테고리 수정' : 'Edit Category') : '➕ ' + (lang === 'ko' ? '카테고리 추가' : 'Add Category')}
                 </h3>
-                
+
                 <div className="space-y-4">
                   <div>
                     <label className="text-xs text-gray-500 block mb-1">{lang === 'ko' ? '이모지' : 'Emoji'}</label>
-                    <input 
-                      type="text" 
-                      value={newCategoryEmoji} 
+                    <input
+                      type="text"
+                      value={newCategoryEmoji}
                       onChange={e => setNewCategoryEmoji(e.target.value)}
                       className="w-full p-3 text-2xl text-center border rounded-lg"
                       maxLength="2"
                     />
                   </div>
-                  
+
                   <div>
                     <label className="text-xs text-gray-500 block mb-1">{lang === 'ko' ? '이름' : 'Name'}</label>
-                    <input 
-                      type="text" 
-                      value={newCategoryName} 
+                    <input
+                      type="text"
+                      value={newCategoryName}
                       onChange={e => setNewCategoryName(e.target.value)}
                       placeholder={lang === 'ko' ? '예: Poster' : 'e.g. Poster'}
                       className="w-full p-3 border rounded-lg"
                     />
                   </div>
-                  
+
                   {editingCategory && (editingCategory.id === 'clicker' || editingCategory.id === 'sticker') && (
                     <div className="p-3 bg-blue-50 rounded-lg text-xs text-blue-700">
                       💡 {lang === 'ko' ? '이 카테고리는 2+1 할인이 적용됩니다' : 'This category has 2+1 deal applied'}
                     </div>
                   )}
                 </div>
-                
+
                 <div className="flex gap-2 mt-6">
                   <button onClick={() => { resetCategoryForm(); setShowCategoryModal(false); }} className="flex-1 py-3 rounded-xl bg-gray-200 font-medium">{t.cancel}</button>
                   {editingCategory && editingCategory.id !== 'clicker' && editingCategory.id !== 'sticker' && editingCategory.id !== 'keyring' && editingCategory.id !== 'blindbag' && (
                     <button onClick={() => handleDeleteCategory(editingCategory.id)} className="py-3 px-4 rounded-xl bg-red-100 text-red-600 font-medium">🗑️</button>
                   )}
-                  <button 
-                    onClick={editingCategory ? handleEditCategory : handleAddCategory} 
+                  <button
+                    onClick={editingCategory ? handleEditCategory : handleAddCategory}
                     disabled={!newCategoryName.trim()}
                     className={`flex-1 py-3 rounded-xl font-medium ${!newCategoryName.trim() ? 'bg-gray-300 text-gray-500' : 'bg-blue-600 text-white'}`}
                   >
@@ -1686,7 +1935,7 @@
                 <h3 className="text-lg font-bold mb-4">⚙️ {t.taxSetting}</h3>
                 <p className="text-sm text-gray-500 mb-4">{t.taxForSquare}</p>
                 <div className="flex items-center justify-center gap-2 mb-4">
-                  <input type="number" min="0" max="20" step="0.1" value={tempTaxRate} onChange={e => setTempTaxRate(parseFloat(e.target.value) || 0)} className="w-24 p-3 text-xl font-bold text-center border rounded-lg"/>
+                  <input type="number" min="0" max="20" step="0.1" value={tempTaxRate} onChange={e => setTempTaxRate(parseFloat(e.target.value) || 0)} className="w-24 p-3 text-xl font-bold text-center border rounded-lg" />
                   <span className="text-xl font-bold">%</span>
                 </div>
                 <div className="flex gap-2">
@@ -1717,9 +1966,9 @@
 
                 {/* 새 상품 추가 */}
                 <div className="flex gap-2 mb-4">
-                  <input type="text" value={newProductName} onChange={e => setNewProductName(e.target.value)} placeholder={t.newProduct} className="flex-1 p-2 border rounded-lg text-sm"/>
+                  <input type="text" value={newProductName} onChange={e => setNewProductName(e.target.value)} placeholder={t.newProduct} className="flex-1 p-2 border rounded-lg text-sm" />
                   {categories.find(c => c.id === selectedCategory)?.priceType === 'fixed' && (
-                    <input type="number" value={newProductPrice} onChange={e => setNewProductPrice(parseFloat(e.target.value) || 0)} placeholder="$" className="w-16 p-2 border rounded-lg text-sm text-center"/>
+                    <input type="number" value={newProductPrice} onChange={e => setNewProductPrice(parseFloat(e.target.value) || 0)} placeholder="$" className="w-16 p-2 border rounded-lg text-sm text-center" />
                   )}
                   <button onClick={handleAddProduct} disabled={!newProductName.trim()} className="px-4 py-2 bg-green-500 text-white rounded-lg text-sm font-medium disabled:bg-gray-300">+</button>
                 </div>
@@ -1733,38 +1982,40 @@
                         const isFixed = productCat?.priceType === 'fixed';
                         const showPrice = product.price !== undefined || isFixed;
                         return editingProduct?.id === product.id ? (
-                        <>
-                          <input type="text" defaultValue={product.name} autoFocus id={`edit-name-${product.id}`} className="flex-1 p-1 border rounded text-sm"/>
-                          {showPrice && (
-                            <input type="number" defaultValue={product.price || 0} id={`edit-price-${product.id}`} className="w-16 p-1 border rounded text-sm text-center" placeholder="$"/>
-                          )}
-                          <input type="number" defaultValue={product.stock} id={`edit-stock-${product.id}`} className="w-16 p-1 border rounded text-sm text-center"/>
-                          <button onClick={() => {
-                            const name = document.getElementById(`edit-name-${product.id}`).value;
-                            const priceEl = document.getElementById(`edit-price-${product.id}`);
-                            const stock = document.getElementById(`edit-stock-${product.id}`).value;
-                            const updated = products.map(p => {
-                              if (p.id === product.id) {
-                                const result = { ...p, name, stock: parseInt(stock) || 0 };
-                                if (priceEl) result.price = parseFloat(priceEl.value) || 0;
-                                return result;
-                              }
-                              return p;
-                            });
-                            saveProducts(updated);
-                            setEditingProduct(null);
-                          }} className="p-1 text-green-500">✓</button>
-                          <button onClick={() => setEditingProduct(null)} className="p-1 text-gray-500">✕</button>
-                        </>
-                      ) : (
-                        <>
-                          <span className="flex-1 text-sm font-medium">{product.name}</span>
-                          {showPrice && <span className="text-sm text-green-600 font-medium">${product.price || 0}</span>}
-                          <span className="text-sm text-blue-600">{product.stock}</span>
-                          <button onClick={() => setEditingProduct(product)} className="p-1 text-blue-500">✏️</button>
-                          <button onClick={() => handleDeleteProduct(product)} className="p-1 text-red-500">🗑️</button>
-                        </>
-                      );
+                          <>
+                            <input type="text" defaultValue={product.name} autoFocus id={`edit-name-${product.id}`} className="flex-1 p-1 border rounded text-sm" />
+                            {showPrice && (
+                              <input type="number" defaultValue={product.price || 0} id={`edit-price-${product.id}`} className="w-16 p-1 border rounded text-sm text-center" placeholder="$" />
+                            )}
+                            <input type="number" defaultValue={product.stock} id={`edit-stock-${product.id}`} className="w-16 p-1 border rounded text-sm text-center" />
+                            <button onClick={async () => {
+                              const name = document.getElementById(`edit-name-${product.id}`).value;
+                              const priceEl = document.getElementById(`edit-price-${product.id}`);
+                              const stock = document.getElementById(`edit-stock-${product.id}`).value;
+                              // 🆕 트랜잭션으로 개별 상품만 수정 (전체 덮어쓰기 방지)
+                              await mutateProducts(currentProducts =>
+                                currentProducts.map(p => {
+                                  if (p.id === product.id) {
+                                    const result = { ...p, name, stock: parseInt(stock) || 0 };
+                                    if (priceEl) result.price = parseFloat(priceEl.value) || 0;
+                                    return result;
+                                  }
+                                  return p;
+                                })
+                              );
+                              setEditingProduct(null);
+                            }} className="p-1 text-green-500">✓</button>
+                            <button onClick={() => setEditingProduct(null)} className="p-1 text-gray-500">✕</button>
+                          </>
+                        ) : (
+                          <>
+                            <span className="flex-1 text-sm font-medium">{product.name}</span>
+                            {showPrice && <span className="text-sm text-green-600 font-medium">${product.price || 0}</span>}
+                            <span className="text-sm text-blue-600">{product.stock}</span>
+                            <button onClick={() => setEditingProduct(product)} className="p-1 text-blue-500">✏️</button>
+                            <button onClick={() => handleDeleteProduct(product)} className="p-1 text-red-500">🗑️</button>
+                          </>
+                        );
                       })()}
                     </div>
                   ))}
@@ -1793,20 +2044,20 @@
                   ))}
                 </div>
                 <div className="mb-4">
-                  <input type="text" value={editMemo} onChange={e => editDispatch({ type: 'SET_MEMO', value: e.target.value })} placeholder={`📝 ${t.memo}`} className="w-full p-2 border rounded-lg text-sm"/>
+                  <input type="text" value={editMemo} onChange={e => editDispatch({ type: 'SET_MEMO', value: e.target.value })} placeholder={`📝 ${t.memo}`} className="w-full p-2 border rounded-lg text-sm" />
                 </div>
                 <div className="mb-4 p-3 bg-blue-50 rounded-lg">
                   <div className="flex justify-between mb-2">
                     <span className="text-sm">{t.amount}:</span>
                     <label className="flex items-center gap-2 text-xs">
-                      <input type="checkbox" checked={useCustomPrice} onChange={e => editDispatch({ type: 'SET_USE_CUSTOM_PRICE', value: e.target.checked })}/>
+                      <input type="checkbox" checked={useCustomPrice} onChange={e => editDispatch({ type: 'SET_USE_CUSTOM_PRICE', value: e.target.checked })} />
                       {t.customInput}
                     </label>
                   </div>
                   {useCustomPrice ? (
                     <div className="flex items-center justify-center gap-2">
                       <span className="text-xl">$</span>
-                      <input type="number" min="0" value={editPrice} onChange={e => editDispatch({ type: 'SET_PRICE', value: parseFloat(e.target.value) || 0 })} className="w-24 p-2 text-xl font-bold text-center border rounded-lg"/>
+                      <input type="number" min="0" value={editPrice} onChange={e => editDispatch({ type: 'SET_PRICE', value: parseFloat(e.target.value) || 0 })} className="w-24 p-2 text-xl font-bold text-center border rounded-lg" />
                     </div>
                   ) : (
                     <div className="text-center">
@@ -1851,8 +2102,8 @@
                   <div className="flex justify-between text-sm"><span>💳 {t.card}</span><span>{formatCurrency(currentStats.cardRevenue)}</span></div>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={() => setShowCloseModal(false)} className="flex-1 py-3 rounded-xl bg-gray-200 font-medium">{t.cancel}</button>
-                  <button onClick={handleDayClose} className="flex-1 py-3 rounded-xl bg-orange-500 text-white font-medium">{t.finalize}</button>
+                  <button onClick={() => setShowCloseModal(false)} disabled={isClosing} className="flex-1 py-3 rounded-xl bg-gray-200 font-medium">{t.cancel}</button>
+                  <button onClick={handleDayClose} disabled={isClosing} className={`flex-1 py-3 rounded-xl font-medium ${isClosing ? 'bg-yellow-500 text-white animate-pulse' : 'bg-orange-500 text-white'}`}>{isClosing ? `⏳ ${t.closing}` : t.finalize}</button>
                 </div>
               </div>
             </div>
@@ -1920,7 +2171,8 @@
                     );
                   })}
                 </div>
-                <button onClick={() => handleRestoreSales(viewingRecord)} className="w-full py-3 bg-orange-100 text-orange-700 rounded-xl font-medium">↩️ {t.restore}</button>
+                <button onClick={() => handleRestoreSales(viewingRecord)} className="w-full py-3 bg-orange-100 text-orange-700 rounded-xl font-medium mb-2">↩️ {t.restore}</button>
+                <button onClick={() => handleArchiveRecord(viewingRecord)} className="w-full py-2 text-sm text-gray-500 hover:text-red-500 hover:bg-red-50 rounded-lg">📦 {t.archive}</button>
               </div>
             </div>
           )}
@@ -1960,7 +2212,7 @@
                     {logs.slice(0, 100).map(log => {
                       const time = new Date(log.timestamp).toLocaleString(lang === 'ko' ? 'ko-KR' : 'en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                       let icon, label, details, bgColor;
-                      switch(log.action) {
+                      switch (log.action) {
                         case 'sale_created': icon = '💰'; label = t.saleCreated; details = formatCurrency(log.price); bgColor = 'bg-green-50'; break;
                         case 'sale_cancelled': icon = '🗑️'; label = t.saleCancelled; details = formatCurrency(log.price); bgColor = 'bg-red-50'; break;
                         case 'sale_edited': icon = '✏️'; label = t.saleEdited; details = `${formatCurrency(log.before?.price || 0)} → ${formatCurrency(log.after?.price || 0)}`; bgColor = 'bg-blue-50'; break;
@@ -1997,4 +2249,5 @@
     ReactDOM.render(<App />, document.getElementById('root'));
   </script>
 </body>
+
 </html>
